@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# SatLodge WebPlus - Scarthgap Version
+# SatLodge WebPlus - Scarthgap Version (Python 3.12 Fix)
 # Maintainer: SatLodge Team
 
 from Plugins.Plugin import PluginDescriptor
@@ -9,71 +9,87 @@ from Components.Label import Label
 from Components.MenuList import MenuList
 from Components.Pixmap import Pixmap
 from Screens.Console import Console
+from twisted.web.client import getPage
 import os
 import xml.etree.ElementTree as ET
 
+# --- IMPORT SATLODGE CORE ---
+try:
+    from Plugins.Extensions.SatLodgeCore.slinfo import SatLodgeInfo
+except ImportError:
+    SatLodgeInfo = None
+
 # --- METADATI ---
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 XML_URL = "http://webplusfeeds.sat-lodge.it/xml/PluginEmulators.xml"
+# FIX PER PYTHON 3.12: Usiamo una stringa normale, non bytes
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-class SatLodgePanel(Screen):
-    skin = """
-        <screen name="SatLodgePanel" position="center,center" size="1200,850" title="SatLodge WebPlus v%s" backgroundColor="#101010">
-            <eLabel position="0,0" size="1200,100" backgroundColor="#1a1a1a" zPosition="-1" />
-            <widget name="header" position="40,25" size="1120,50" font="Regular;45" halign="left" transparent="1" foregroundColor="#ffffff" />
-            <widget name="logo" position="center,130" size="400,400" alphatest="on" />
-            <widget name="menu" position="100,530" size="1000,250" itemHeight="60" font="Regular;32" scrollbarMode="showOnDemand" />
-            <widget name="status" position="center,795" size="1100,40" font="Regular;30" halign="center" foregroundColor="#ffcc00" transparent="1" />
-        </screen>""" % VERSION
-
+class WebPlusScreen(Screen):
     def __init__(self, session):
         Screen.__init__(self, session)
-        self["header"] = Label("SATLODGE WEBPLUS PRO")
-        self["logo"] = Pixmap()
+        self.skinName = "WebPlusScreen"
+        
+        self["header"] = Label("SatLodge WebPlus")
+        self["list"] = MenuList([])
         self["status"] = Label("Caricamento lista...")
-        self["menu"] = MenuList([])
-        self.menu_list = []
-        self["actions"] = ActionMap(["OkCancelActions"], {"ok": self.conferma, "cancel": self.close}, -1)
-        self.onLayoutFinish.append(self.avvio)
+        self["info_box"] = Label("Info Sistema: Caricamento...")
 
-    def avvio(self):
-        # Percorso dinamico per il logo
-        p = os.path.dirname(__file__) + "/plugin.png"
-        if os.path.exists(p):
-            self["logo"].instance.setPixmapFromFile(p)
-        self.scarica_lista()
-
-    def scarica_lista(self):
-        target = "/tmp/sl_feeds.xml"
-        cmd = 'wget --no-check-certificate -U "%s" "%s" -O %s' % (UA, XML_URL, target)
-        os.system(cmd)
-        self.popola_menu(target)
-
-    def popola_menu(self, path):
-        if os.path.exists(path) and os.path.getsize(path) > 100:
-            try:
-                tree = ET.parse(path)
-                root = tree.getroot()
-                self.menu_list = []
-                for item in root.findall(".//plugin"):
-                    name = item.get("name")
-                    url_node = item.find("url")
-                    if url_node is not None:
-                        url = url_node.text.strip()
-                        self.menu_list.append((name, url))
-                self["menu"].setList(self.menu_list)
-                self["status"].setText("Versione %s - Seleziona e premi OK" % VERSION)
-            except:
-                self["status"].setText("Errore XML Server")
+        if SatLodgeInfo:
+            self.sl_core = SatLodgeInfo()
         else:
-            self["status"].setText("Errore Download Lista")
+            self.sl_core = None
+        
+        self["actions"] = ActionMap(["OkCancelActions", "ColorActions"], {
+            "ok": self.conferma,
+            "cancel": self.close,
+        }, -1)
+
+        self.menu_list = []
+        self.downloadXml()
+        self.aggiornaInfo()
+
+    def aggiornaInfo(self):
+        if self.sl_core:
+            try:
+                modello = self.sl_core.getModel()
+                ram = self.sl_core.getRamInfo()
+                temp = self.sl_core.getCpuTemp()
+                testo = "Box: %s  |  RAM: %s  |  Temp: %s" % (modello, ram, temp)
+                self["info_box"].setText(testo)
+            except:
+                self["info_box"].setText("SatLodge Core: Errore lettura")
+        else:
+            self["info_box"].setText("SatLodge Core: Non trovato")
+
+    def downloadXml(self):
+        # Passiamo l'URL come stringa e l'agente codificato correttamente per Twisted
+        getPage(XML_URL.encode('utf-8'), agent=UA.encode('utf-8'), timeout=10).addCallback(self.parseXml).addErrback(self.errorXml)
+
+    def errorXml(self, error):
+        self["status"].setText("Errore Download Lista")
+
+    def parseXml(self, data):
+        try:
+            root = ET.fromstring(data)
+            self.menu_list = []
+            for item in root.findall(".//plugin"):
+                name = item.get("name")
+                url_node = item.find("url")
+                if url_node is not None:
+                    url = url_node.text.strip()
+                    self.menu_list.append((name, url))
+            self["list"].setList(self.menu_list)
+            self["status"].setText("Versione %s - Seleziona e premi OK" % VERSION)
+        except:
+            self["status"].setText("Errore XML Server")
 
     def conferma(self):
-        sel = self["menu"].getCurrent()
+        sel = self["list"].getCurrent()
         if sel:
             name = sel[0]
             url = sel[1]
+            # Usiamo stringhe normali per i comandi
             if ".zip" in url.lower():
                 cmd = 'wget --no-check-certificate -U "%s" "%s" -O /tmp/addon.zip ; unzip -o /tmp/addon.zip -d / ; wget -qO - http://127.0.0.1/web/servicelistreload?mode=0 ; rm -f /tmp/addon.zip' % (UA, url)
             else:
@@ -81,7 +97,7 @@ class SatLodgePanel(Screen):
             self.session.open(Console, title="Installazione %s" % name, cmdlist=[cmd])
 
 def main(session, **kwargs):
-    session.open(SatLodgePanel)
+    session.open(WebPlusScreen)
 
 def Plugins(**kwargs):
-    return [PluginDescriptor(name="SatLodge WebPlus", description="v%s Addon Manager" % VERSION, where=PluginDescriptor.WHERE_PLUGINMENU, icon="plugin.png", fnc=main)]
+    return [PluginDescriptor(name="SatLodge WebPlus", description="Download Emulators", where=PluginDescriptor.WHERE_PLUGINMENU, icon="plugin.png", fnc=main)]
